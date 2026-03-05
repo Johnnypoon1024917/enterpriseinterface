@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '@/lib/prisma'; 
 import OpenAI from 'openai';
 import crypto from 'crypto';
 
-// TypeScript workaround for the older pdf-parse library
-const pdfParse = require('pdf-parse');
+// Fix for "no default export" and "require() forbidden"
+import * as pdfParse from 'pdf-parse';
 
-// Initialize Prisma
-const prisma = new PrismaClient();
-
-// Initialize S3 Client (MinIO)
 const s3 = new S3Client({
   region: 'us-east-1', 
   endpoint: `http://${process.env.S3_ENDPOINT || 'localhost'}:${process.env.S3_PORT || '9000'}`,
@@ -21,7 +17,6 @@ const s3 = new S3Client({
   forcePathStyle: true, 
 });
 
-// Initialize OpenAI (Local Server)
 const openai = new OpenAI({
   baseURL: 'http://192.168.192.199:1234/v1', 
   apiKey: 'not-needed', 
@@ -40,19 +35,16 @@ function chunkText(text: string, chunkSize = 1000, overlap = 200): string[] {
 export async function POST(req: NextRequest) {
   try {
     const userId = "test-user-id"; 
-
     const formData = await req.formData();
     const file = formData.get('file') as File;
 
-    if (!file) {
-      return NextResponse.json({ error: "No file provided" }, { status: 400 });
-    }
+    if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
 
     const buffer = Buffer.from(await file.arrayBuffer());
     const uniqueFileName = `${Date.now()}-${file.name}`;
     const bucketName = process.env.S3_BUCKET_NAME || 'ai-uploads';
 
-    // 1. Upload to MinIO
+    // Upload to MinIO
     await s3.send(new PutObjectCommand({
       Bucket: bucketName,
       Key: uniqueFileName,
@@ -62,11 +54,12 @@ export async function POST(req: NextRequest) {
     
     const s3Url = `http://${process.env.S3_ENDPOINT || 'localhost'}:${process.env.S3_PORT || '9000'}/${bucketName}/${uniqueFileName}`;
 
-    // 2. Parse PDF Text
-    const pdfData = await pdfParse(buffer);
+    // PDF Parsing Fix: Bypass TS check for the missing .default property
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parseFunction = (pdfParse as any).default || pdfParse;
+    const pdfData = await parseFunction(buffer);
     const rawText = pdfData.text.replace(/\n/g, ' ');
 
-    // 3. Ensure User exists and create Document record
     await prisma.user.upsert({
       where: { id: userId },
       update: {},
@@ -74,41 +67,27 @@ export async function POST(req: NextRequest) {
     });
 
     const document = await prisma.document.create({
-      data: {
-        userId: userId,
-        fileName: file.name,
-        s3Url: s3Url,
-      }
+      data: { userId, fileName: file.name, s3Url }
     });
 
-    // 4. Chunk and Vectorize
     const chunks = chunkText(rawText);
-    
     for (const chunkContent of chunks) {
       const embeddingResponse = await openai.embeddings.create({
         model: 'text-embedding-nomic', 
         input: chunkContent,
       });
       
-      const vector = embeddingResponse.data[0].embedding;
-      const vectorString = `[${vector.join(',')}]`;
-      const chunkId = crypto.randomUUID();
-
-      // Insert directly into pgvector
+      const vectorString = `[${embeddingResponse.data[0].embedding.join(',')}]`;
+      
       await prisma.$executeRaw`
         INSERT INTO "DocumentChunk" ("id", "documentId", "content", "embedding") 
-        VALUES (${chunkId}, ${document.id}, ${chunkContent}, ${vectorString}::vector)
+        VALUES (${crypto.randomUUID()}, ${document.id}, ${chunkContent}, ${vectorString}::vector)
       `;
     }
 
-    return NextResponse.json({ 
-      success: true, 
-      documentId: document.id,
-      message: `Successfully processed ${chunks.length} chunks.`
-    });
-
+    return NextResponse.json({ success: true, documentId: document.id });
   } catch (error) {
-    console.error("Upload Pipeline Error:", error);
-    return NextResponse.json({ error: "Internal Server Error processing document" }, { status: 500 });
+    console.error("Upload Error:", error);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }

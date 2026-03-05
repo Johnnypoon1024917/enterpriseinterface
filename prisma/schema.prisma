@@ -3,12 +3,53 @@
 
 // Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
-  provider = "prisma-client"
-  output   = "../app/generated/prisma"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
+  provider   = "postgresql"
+  extensions = [vector]
+}
+model User {
+  id        String     @id @default(cuid())
+  email     String     @unique
+  chats     Chat[]
+  documents Document[]
+}
+
+model Chat {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  messages  Message[]
+  createdAt DateTime  @default(now())
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  chatId    String
+  role      String   
+  content   String   
+  chat      Chat     @relation(fields: [chatId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model Document {
+  id        String          @id @default(cuid())
+  userId    String
+  fileName  String
+  s3Url     String          
+  user      User            @relation(fields: [userId], references: [id])
+  chunks    DocumentChunk[]
+  createdAt DateTime        @default(now())
+}
+
+model DocumentChunk {
+  id         String    @id @default(cuid())
+  documentId String
+  content    String    
+  embedding  Unsupported("vector(1536)") 
+  document   Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
 }
